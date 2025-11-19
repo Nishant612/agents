@@ -1,4 +1,5 @@
 from __future__ import annotations
+from .interruption_filter import InterruptionFilter
 
 import asyncio
 from collections.abc import AsyncGenerator, AsyncIterable, Coroutine, Generator
@@ -61,6 +62,8 @@ class Agent:
             self._id = "default_agent"
         else:
             self._id = id or misc.camel_to_snake_case(type(self).__name__)
+        
+        self.interrupt_filter = InterruptionFilter()
 
         self._instructions = instructions
         self._tools = tools.copy() + find_function_tools(self)

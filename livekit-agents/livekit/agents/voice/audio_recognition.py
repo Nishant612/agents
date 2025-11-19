@@ -1,3 +1,4 @@
+# audio_recognition.py
 from __future__ import annotations
 
 import asyncio
@@ -314,6 +315,60 @@ class AudioRecognition:
             transcript = ev.alternatives[0].text
             language = ev.alternatives[0].language
             confidence = ev.alternatives[0].confidence
+
+            # -------------------------------
+            # CUSTOM INTERRUPTION FILTER LOGIC (SAFE)
+            # -------------------------------
+            try:
+                # hooks is typically AgentActivity, which exposes .agent -> Agent
+                agent_obj = getattr(self._hooks, "agent", None)
+                interrupt_filter = getattr(agent_obj, "interrupt_filter", None)
+
+                # If an interrupt_filter exists, consult it.
+                # Prefer `should_interrupt(transcript, confidence)` API if available.
+                # If the filter indicates FALSE -> treat as a filler and ignore this final transcript.
+                is_filler = False
+                if interrupt_filter is not None:
+                    # update filter with whether agent is currently speaking (best-effort)
+                    try:
+                        speaking_state = getattr(self._session, "agent_state", None)
+                        # If the session tracks state, inform filter. Best-effort — ignore errors.
+                        if hasattr(interrupt_filter, "update_speaking"):
+                            interrupt_filter.update_speaking(speaking_state == "speaking")
+                    except Exception:
+                        pass
+
+                    if hasattr(interrupt_filter, "should_interrupt"):
+                        try:
+                            should = interrupt_filter.should_interrupt(transcript, confidence)
+                            # if the filter says it should interrupt -> it's NOT a filler
+                            is_filler = not bool(should)
+                        except Exception:
+                            # if filter errors, default to NOT marking as filler
+                            is_filler = False
+                    elif hasattr(interrupt_filter, "is_filler"):
+                        try:
+                            is_filler = bool(interrupt_filter.is_filler(transcript))
+                        except Exception:
+                            is_filler = False
+                    else:
+                        # unknown API: do not treat as filler
+                        is_filler = False
+            except Exception:
+                # everything must be best-effort — do not break the STT path
+                is_filler = False
+
+            if is_filler:
+                logger.info(f"[IGNORED_FILLER] '{transcript}' (conf={confidence})")
+                # *Do not* call on_final_transcript/on_preemptive_generation/run_eou_detection on filler.
+                # But still mark that a final transcript arrived (so commit_user_turn waits can proceed).
+                # We set last_final_transcript_time to avoid stt flush logic issues.
+                self._last_final_transcript_time = time.time()
+                self._final_transcript_confidence.append(confidence)
+                # do not append to audio_transcript
+                # do not call hooks that would interrupt the agent
+                return
+            # --------------------------------
 
             if not self._last_language or (
                 language and len(transcript) > MIN_LANGUAGE_DETECTION_LENGTH
